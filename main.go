@@ -1,7 +1,7 @@
 package main
 
 import (
-	"flag"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,84 +9,78 @@ import (
 	"runtime"
 )
 
-// copyToClipboard copies the given string to the system clipboard
-func copyToClipboard(content string) error {
+func main() {
+	var inputData []byte
+	var err error
+
+	// Inspect stdin mode to check for incoming pipes or redirects
+	stat, statErr := os.Stdin.Stat()
+	isPiped := (statErr == nil) && ((stat.Mode() & os.ModeCharDevice) == 0)
+
+	args := os.Args[1:]
+
+	if len(args) > 0 {
+		// Read and concatenate files if arguments are supplied
+		var buf bytes.Buffer
+		for _, path := range args {
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				fmt.Fprintf(os.Stderr, "copey: failed to read %s: %v\n", path, readErr)
+				os.Exit(1)
+			}
+			buf.Write(data)
+		}
+		inputData = buf.Bytes()
+	} else if isPiped {
+		// Read directly from stdin stream
+		inputData, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "copey: failed to read from stdin: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Usage: copey <file> ... or <command> | copey\n")
+		os.Exit(1)
+	}
+
+	if len(inputData) == 0 {
+		os.Exit(0)
+	}
+
+	if err := copyToClipboard(inputData); err != nil {
+		fmt.Fprintf(os.Stderr, "copey: error copying to clipboard: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// copyToClipboard writes byte data directly into the platform's native clipboard tool.
+func copyToClipboard(data []byte) error {
 	var cmd *exec.Cmd
 
 	switch runtime.GOOS {
-	case "darwin": // macOS
+	case "darwin":
 		cmd = exec.Command("pbcopy")
-	case "linux": // Linux
-		cmd = exec.Command("xclip", "-selection", "clipboard")
-	case "windows": // Windows
+	case "linux":
+		if os.Getenv("WAYLAND_DISPLAY") != "" && commandExists("wl-copy") {
+			cmd = exec.Command("wl-copy")
+		} else if commandExists("xclip") {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else if commandExists("xsel") {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		} else {
+			return fmt.Errorf("no clipboard utility found (install wl-clipboard, xclip, or xsel)")
+		}
+	case "windows":
 		cmd = exec.Command("clip")
 	default:
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
 
-	// Get the stdin pipe to write our content
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("error creating pipe: %v", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("error starting command: %v", err)
-	}
-
-	// Write the content to the pipe
-	_, err = io.WriteString(in, content)
-	if err != nil {
-		return fmt.Errorf("error writing to pipe: %v", err)
-	}
-
-	// Close the pipe
-	if err := in.Close(); err != nil {
-		return fmt.Errorf("error closing pipe: %v", err)
-	}
-
-	// Wait for the command to finish
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("command finished with error: %v", err)
-	}
-
-	return nil
+	cmd.Stdin = bytes.NewReader(data)
+	return cmd.Run()
 }
 
-func main() {
-	// Define command-line flag for the file path
-	filePath := flag.String("file", "", "Path to the file to copy to clipboard")
-	flag.Parse()
-
-	// Check if file path was provided
-	if *filePath == "" {
-		fmt.Println("Error: Please provide a file path using -file flag")
-		fmt.Println("Usage: program -file <path_to_file>")
-		os.Exit(1)
-	}
-
-	// Open the file
-	file, err := os.Open(*filePath)
-	if err != nil {
-		fmt.Printf("Error opening file: %v\n", err)
-		os.Exit(1)
-	}
-	defer file.Close()
-
-	// Read the file contents
-	content, err := io.ReadAll(file)
-	if err != nil {
-		fmt.Printf("Error reading file: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Copy to clipboard
-	err = copyToClipboard(string(content))
-	if err != nil {
-		fmt.Printf("Error copying to clipboard: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Successfully copied contents of %s to clipboard\n", *filePath)
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
